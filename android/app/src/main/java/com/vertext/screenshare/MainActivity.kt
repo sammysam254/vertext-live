@@ -28,7 +28,7 @@ import java.net.URL
 class MainActivity : ComponentActivity() {
 
     // ── Update this after deploying to Render ─────────────────────
-    private val BACKEND_URL = "https://your-vertext-backend.onrender.com"
+    private val BACKEND_URL = "https://vertextlive.onrender.com"
 
     private val projectionManager by lazy {
         getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
