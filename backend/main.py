@@ -1,109 +1,142 @@
 """
-Vertext Live — Token Server
-Streamers generate an 8-digit PIN in the Android app.
-Viewers just enter the PIN on the public web page — no API key needed.
+Vertext Live — Self-hosted WebRTC Signaling Server
+No third-party API keys needed. Runs entirely on Render.
+Flow:
+  1. Android streamer connects → generates 8-digit PIN
+  2. Web viewer enters PIN → joins same room
+  3. Server relays WebRTC offer/answer/ICE between them
 """
-import os, time, random, string
-from fastapi import FastAPI, HTTPException
+import os, json, random, string, time
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from livekit import api
 
-app = FastAPI(title="Vertext Live API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Vertext Live")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-LIVEKIT_API_KEY    = os.environ["LIVEKIT_API_KEY"]
-LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
-LIVEKIT_URL        = os.environ["LIVEKIT_URL"]
-
-# In-memory PIN store { pin: { room, expires_at } }
-pin_store: dict = {}
+# { pin: { "streamer": WebSocket | None, "viewers": [WebSocket], "room": str, "expires": float } }
+rooms: dict = {}
 
 
-def _clean_expired():
+def clean_expired():
     now = time.time()
-    for p in [k for k, v in pin_store.items() if v["expires_at"] < now]:
-        del pin_store[p]
+    for pin in [k for k, v in rooms.items() if v["expires"] < now]:
+        del rooms[pin]
 
 
-def _make_token(room: str, identity: str, can_publish: bool) -> str:
-    at = api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
-    at.with_identity(identity)
-    at.with_name(identity)
-    at.with_grants(api.VideoGrants(
-        room_join=True, room=room,
-        can_publish=can_publish,
-        can_subscribe=True,
-        can_publish_data=can_publish,
-    ))
-    at.with_ttl(7200)
-    return at.to_jwt()
-
-
-# ── Models ────────────────────────────────────────────────────────────
-
-class GeneratePinRequest(BaseModel):
-    room_name: str
-
-class WatchRequest(BaseModel):
-    pin: str
-    viewer_name: str = "viewer"
-
-
-# ── Routes ────────────────────────────────────────────────────────────
-
-@app.post("/pin/generate")
-def generate_pin(req: GeneratePinRequest):
-    """Android app calls this → gets 8-digit PIN + publisher LiveKit token."""
-    _clean_expired()
+def make_pin() -> str:
     for _ in range(30):
         pin = "".join(random.choices(string.digits, k=8))
-        if pin not in pin_store:
-            break
-    pin_store[pin] = {
-        "room": req.room_name,
-        "expires_at": time.time() + 86400,
-    }
-    return {
-        "pin": pin,
-        "livekit_url": LIVEKIT_URL,
-        "livekit_token": _make_token(req.room_name, f"host-{pin}", True),
-        "room": req.room_name,
-        "expires_in": "24 hours",
-    }
+        if pin not in rooms:
+            return pin
+    return "".join(random.choices(string.digits, k=8))
 
 
-@app.post("/watch")
-def watch(req: WatchRequest):
-    """
-    Public endpoint — anyone with the 8-digit PIN can call this.
-    No authentication required. Returns a subscriber-only LiveKit token.
-    """
-    _clean_expired()
-    entry = pin_store.get(req.pin)
-    if not entry:
+# ── REST ─────────────────────────────────────────────────────────────
+
+class GenerateRequest(BaseModel):
+    room_name: str
+
+@app.post("/pin/generate")
+def generate_pin(req: GenerateRequest):
+    clean_expired()
+    pin = make_pin()
+    rooms[pin] = {
+        "streamer": None,
+        "viewers": [],
+        "room": req.room_name,
+        "expires": time.time() + 86400,
+    }
+    return {"pin": pin, "room": req.room_name, "expires_in": "24 hours"}
+
+
+@app.post("/pin/validate")
+def validate_pin(body: dict):
+    clean_expired()
+    pin = body.get("pin", "")
+    if pin not in rooms:
         raise HTTPException(status_code=404, detail="Invalid or expired PIN")
-    return {
-        "livekit_url": LIVEKIT_URL,
-        "livekit_token": _make_token(
-            entry["room"],
-            f"{req.viewer_name}-{int(time.time())}",
-            False,
-        ),
-        "room": entry["room"],
-    }
+    return {"valid": True, "room": rooms[pin]["room"]}
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "active_pins": len(pin_store), "ts": int(time.time())}
+    return {"status": "ok", "active_rooms": len(rooms)}
 
 
-# Serve the web viewer from /web at the root URL
+# ── WebSocket Signaling ───────────────────────────────────────────────
+
+@app.websocket("/ws/{pin}/{role}")
+async def websocket_endpoint(ws: WebSocket, pin: str, role: str):
+    """
+    role = "streamer" or "viewer"
+    Messages are JSON: { "type": "offer"|"answer"|"ice"|"ready"|"ping" }
+    """
+    await ws.accept()
+
+    if pin not in rooms:
+        await ws.send_json({"type": "error", "message": "Invalid PIN"})
+        await ws.close()
+        return
+
+    room = rooms[pin]
+
+    if role == "streamer":
+        room["streamer"] = ws
+        await ws.send_json({"type": "connected", "role": "streamer", "pin": pin})
+        # Notify any waiting viewers
+        for viewer in room["viewers"]:
+            try:
+                await viewer.send_json({"type": "streamer_joined"})
+            except Exception:
+                pass
+    else:
+        room["viewers"].append(ws)
+        await ws.send_json({"type": "connected", "role": "viewer", "pin": pin})
+        # Tell streamer a new viewer arrived
+        if room["streamer"]:
+            try:
+                await room["streamer"].send_json({"type": "viewer_joined"})
+            except Exception:
+                pass
+
+    try:
+        while True:
+            data = await ws.receive_json()
+            msg_type = data.get("type")
+
+            if role == "streamer":
+                # Streamer → broadcast to all viewers
+                dead = []
+                for viewer in room["viewers"]:
+                    try:
+                        await viewer.send_json(data)
+                    except Exception:
+                        dead.append(viewer)
+                for d in dead:
+                    room["viewers"].remove(d)
+
+            else:
+                # Viewer → send to streamer
+                if room["streamer"]:
+                    try:
+                        await room["streamer"].send_json(data)
+                    except Exception:
+                        room["streamer"] = None
+
+    except WebSocketDisconnect:
+        if role == "streamer":
+            room["streamer"] = None
+            for viewer in room["viewers"]:
+                try:
+                    await viewer.send_json({"type": "streamer_left"})
+                except Exception:
+                    pass
+        else:
+            if ws in room["viewers"]:
+                room["viewers"].remove(ws)
+
+
+# Serve web viewer — must be last
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

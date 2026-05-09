@@ -27,14 +27,14 @@ import java.net.URL
 
 class MainActivity : ComponentActivity() {
 
-    // ── Your Render backend URL — update after deploying ─────────────
+    // ── Update this after deploying to Render ─────────────────────
     private val BACKEND_URL = "https://your-vertext-backend.onrender.com"
 
     private val projectionManager by lazy {
         getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     }
-    private var pendingUrl   = ""
-    private var pendingToken = ""
+
+    private var pendingPin = ""
 
     private val screenLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -44,8 +44,8 @@ class MainActivity : ComponentActivity() {
                 action = ScreenShareService.ACTION_START
                 putExtra(ScreenShareService.EXTRA_RESULT_CODE, result.resultCode)
                 putExtra(ScreenShareService.EXTRA_RESULT_DATA, result.data)
-                putExtra(ScreenShareService.EXTRA_LIVEKIT_URL, pendingUrl)
-                putExtra(ScreenShareService.EXTRA_LIVEKIT_TOKEN, pendingToken)
+                putExtra(ScreenShareService.EXTRA_BACKEND_URL, BACKEND_URL)
+                putExtra(ScreenShareService.EXTRA_PIN, pendingPin)
             })
         } else {
             Toast.makeText(this, "Screen permission denied", Toast.LENGTH_SHORT).show()
@@ -58,9 +58,8 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 StreamerUI(
                     backendUrl = BACKEND_URL,
-                    onStartStream = { url, token ->
-                        pendingUrl   = url
-                        pendingToken = token
+                    onStartStream = { pin ->
+                        pendingPin = pin
                         screenLauncher.launch(projectionManager.createScreenCaptureIntent())
                     },
                     onStopStream = {
@@ -77,89 +76,68 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun StreamerUI(
     backendUrl: String,
-    onStartStream: (url: String, token: String) -> Unit,
+    onStartStream: (pin: String) -> Unit,
     onStopStream: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-
     var roomName    by remember { mutableStateOf("") }
     var pin         by remember { mutableStateOf("") }
     var isStreaming by remember { mutableStateOf(false) }
     var isLoading   by remember { mutableStateOf(false) }
     var error       by remember { mutableStateOf("") }
 
-    val red    = Color(0xFFFF2D2D)
-    val dark   = Color(0xFF080808)
-    val panel  = Color(0xFF101010)
-    val muted  = Color(0xFF444444)
+    val red   = Color(0xFFFF2D2D)
+    val dark  = Color(0xFF080808)
+    val panel = Color(0xFF101010)
+    val muted = Color(0xFF444444)
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(dark)
-            .padding(horizontal = 24.dp),
+        modifier = Modifier.fillMaxSize().background(dark).padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(Modifier.height(52.dp))
-
-        // ── Logo ──
         Text("VERTEXT LIVE", fontSize = 30.sp, fontWeight = FontWeight.Black,
             letterSpacing = 6.sp, color = Color.White)
         Text("STREAMER", fontSize = 10.sp, letterSpacing = 5.sp, color = red)
-
         Spacer(Modifier.height(36.dp))
 
-        // ── PIN card ──
+        // PIN Display
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(panel, RoundedCornerShape(6.dp))
-                .padding(28.dp),
+            modifier = Modifier.fillMaxWidth()
+                .background(panel, RoundedCornerShape(6.dp)).padding(28.dp),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("YOUR STREAM PIN", fontSize = 9.sp, letterSpacing = 3.sp, color = muted)
                 Spacer(Modifier.height(12.dp))
-
                 if (pin.isEmpty()) {
-                    // placeholder dashes
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         repeat(8) {
                             Box(
-                                modifier = Modifier
-                                    .size(30.dp, 42.dp)
+                                modifier = Modifier.size(30.dp, 42.dp)
                                     .background(Color(0xFF1A1A1A), RoundedCornerShape(4.dp)),
                                 contentAlignment = Alignment.Center
-                            ) {
-                                Text("–", fontSize = 18.sp, color = muted, fontWeight = FontWeight.Bold)
-                            }
+                            ) { Text("–", fontSize = 18.sp, color = muted, fontWeight = FontWeight.Bold) }
                         }
                     }
                 } else {
-                    // Show PIN as individual digit boxes
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         pin.forEach { digit ->
                             Box(
-                                modifier = Modifier
-                                    .size(30.dp, 48.dp)
+                                modifier = Modifier.size(30.dp, 48.dp)
                                     .background(Color(0xFF1A0000), RoundedCornerShape(4.dp)),
                                 contentAlignment = Alignment.Center
-                            ) {
-                                Text(digit.toString(), fontSize = 22.sp,
-                                    color = Color.White, fontWeight = FontWeight.Black)
-                            }
+                            ) { Text(digit.toString(), fontSize = 22.sp, color = Color.White, fontWeight = FontWeight.Black) }
                         }
                     }
                     Spacer(Modifier.height(10.dp))
-                    Text("Share this PIN with viewers", fontSize = 10.sp, color = muted,
-                        letterSpacing = 1.sp)
+                    Text("Share this PIN with viewers", fontSize = 10.sp, color = muted, letterSpacing = 1.sp)
                 }
             }
         }
 
         Spacer(Modifier.height(24.dp))
 
-        // ── Room name input ──
         OutlinedTextField(
             value = roomName,
             onValueChange = { roomName = it },
@@ -168,9 +146,7 @@ fun StreamerUI(
             enabled = !isStreaming && !isLoading,
             modifier = Modifier.fillMaxWidth(),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = red,
-                focusedLabelColor  = red,
-            )
+                focusedBorderColor = red, focusedLabelColor = red)
         )
 
         if (error.isNotEmpty()) {
@@ -196,13 +172,11 @@ fun StreamerUI(
                             }
                             val json = JSONObject(conn.inputStream.bufferedReader().readText())
                             val generatedPin = json.getString("pin")
-                            val lkUrl        = json.getString("livekit_url")
-                            val lkToken      = json.getString("livekit_token")
                             withContext(Dispatchers.Main) {
-                                pin         = generatedPin
-                                isLoading   = false
+                                pin = generatedPin
+                                isLoading = false
                                 isStreaming = true
-                                onStartStream(lkUrl, lkToken)
+                                onStartStream(generatedPin)
                             }
                         } catch (e: Exception) {
                             withContext(Dispatchers.Main) {
@@ -222,22 +196,14 @@ fun StreamerUI(
             }
         } else {
             Button(
-                onClick = {
-                    isStreaming = false; pin = ""
-                    onStopStream()
-                },
+                onClick = { isStreaming = false; pin = ""; onStopStream() },
                 modifier = Modifier.fillMaxWidth().height(52.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E1E1E)),
                 shape = RoundedCornerShape(4.dp)
-            ) {
-                Text("STOP STREAM", fontWeight = FontWeight.Bold, letterSpacing = 2.sp, color = red)
-            }
+            ) { Text("STOP STREAM", fontWeight = FontWeight.Bold, letterSpacing = 2.sp, color = red) }
             Spacer(Modifier.height(14.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxWidth()
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
                 Box(Modifier.size(8.dp).background(red, RoundedCornerShape(50)))
                 Spacer(Modifier.width(8.dp))
                 Text("LIVE — $roomName", fontSize = 11.sp, color = red, letterSpacing = 2.sp)
