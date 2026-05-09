@@ -15,8 +15,18 @@ android {
         versionName "1.0"
     }
 
+    signingConfigs {
+        release {
+            storeFile file('vertext.keystore')
+            storePassword System.getenv('KEYSTORE_PASSWORD') ?: 'vertext123'
+            keyAlias System.getenv('KEY_ALIAS') ?: 'vertext'
+            keyPassword System.getenv('KEY_PASSWORD') ?: 'vertext123'
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
